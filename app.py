@@ -11,6 +11,8 @@ from pyzotero import zotero
 st.set_page_config(page_title="Avis til Zotero", page_icon="📰", layout="centered")
 st.title("📰 Avisutklipp til Zotero")
 
+MAPPE_NAVN = "Avisartikler via Streamlit"
+
 # Hent konfigurasjon fra Streamlit Secrets
 ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip().strip('"').strip("'")
 ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip().strip('"').strip("'")
@@ -24,6 +26,17 @@ opplastede_filer = st.file_uploader(
     accept_multiple_files=True
 )
 
+def finn_eller_opprett_samling(zot, samlingsnavn):
+    """Finner Zotero-nøkkelen til en samling/mappe, eller oppretter den på rotnivå."""
+    alle_samlinger = zot.collections()
+    for col in alle_samlinger:
+        if col.get("data", {}).get("name") == samlingsnavn:
+            return col["key"]
+    
+    # Tving mappen til rotnivå (parentCollection: False)
+    ny_samling = zot.create_collections([{"name": samlingsnavn, "parentCollection": False}])
+    return ny_samling["successful"]["0"]["key"]
+
 if opplastede_filer:
     opplastede_filer.sort(key=lambda x: x.name)
     st.caption(f"Filer i rekkefølge: {', '.join([f.name for f in opplastede_filer])}")
@@ -32,10 +45,9 @@ if opplastede_filer:
         progress = st.progress(0, text="Analyserer oppslaget med Gemini...")
         
         try:
-            # 1. Klargjør bilder for metadata (første side for byline/tittel, siste side for slutt-sidetall)
+            # 1. Klargjør bilder for metadata (første og siste side)
             deler_til_gemini = []
             
-            # Første bilde
             b64_forste = base64.b64encode(opplastede_filer[0].getvalue()).decode("utf-8")
             deler_til_gemini.append({
                 "inline_data": {
@@ -44,7 +56,6 @@ if opplastede_filer:
                 }
             })
             
-            # Siste bilde (hvis det er mer enn 1 bilde)
             if len(opplastede_filer) > 1:
                 b64_siste = base64.b64encode(opplastede_filer[-1].getvalue()).decode("utf-8")
                 deler_til_gemini.append({
@@ -55,7 +66,15 @@ if opplastede_filer:
                 })
 
             prompt = """
-            Analyser disse avissidene (første og siste side av en artikkel) og trekk ut bibliografisk metadata.
+            Analyser disse avissidene (første og siste side av en avisartikkel) og trekk ut bibliografisk metadata.
+            
+            VIKTIG OM DATO OG ÅRSTALL:
+            - Se nøye på datostripen/kolofonen øverst eller nederst på siden (f.eks. 'Lørdag 19. september 2026').
+            - Les av det FAKTISKE året som står trykket (f.eks. 2026). Ikke gjett eller endre årstallet til eldre årstall. Formatet skal være YYYY-MM-DD.
+            
+            VIKTIG OM SIDETALL:
+            - Se på sidetallene trykket i hjørnene på første og siste side, og oppgi hele spennet (f.eks. 16-21).
+
             Svar KUN med et gyldig JSON-objekt:
             {
               "title": "Hovedoverskriften på artikkelen",
@@ -64,7 +83,7 @@ if opplastede_filer:
               "place": "By/sted avisen utgis i (f.eks. Kristiansand)",
               "section": "Seksjon/del (f.eks. Helg, Magasin, Nyheter)",
               "date": "YYYY-MM-DD",
-              "pages": "Komplett sideintervall (f.eks. 16-21 basert på sidene som vises)",
+              "pages": "Komplett sideintervall (f.eks. 16-21)",
               "language": "Norsk",
               "tags": ["3-5", "relevante", "emneord", "om", "saken"],
               "abstractNote": "Kort og konsist sammendrag av ingressen/saken på 1-2 setninger"
@@ -80,7 +99,6 @@ if opplastede_filer:
             }
             payload = {"contents": [{"parts": deler_til_gemini}]}
 
-            # Forespørsel med retry ved midlertidig 503-kø
             resp = None
             for forsok in range(3):
                 resp = requests.post(url, headers=headers, json=payload)
@@ -97,7 +115,7 @@ if opplastede_filer:
             renset_json = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
             metadata = json.loads(renset_json)
 
-            progress.progress(40, text=f"Fant: «{metadata.get('title')}» ({metadata.get('pages')}). Pakker PDF...")
+            progress.progress(40, text=f"Fant: «{metadata.get('title')}» ({metadata.get('date')}, s. {metadata.get('pages')}). Pakker PDF...")
 
             # 2. Pakk alle bildene til én tapsfri PDF
             alle_bytes = [f.getvalue() for f in opplastede_filer]
@@ -108,12 +126,13 @@ if opplastede_filer:
             with open(temp_pdf_sti, "wb") as f:
                 f.write(pdf_bytes)
 
-            progress.progress(70, text="Laster opp til Zotero Cloud...")
+            progress.progress(70, text=f"Lagrer i mappen «{MAPPE_NAVN}» i Zotero...")
 
-            # 3. Opprett element og fyll ut felter i Zotero
+            # 3. Zotero-opprettelse
             zot = zotero.Zotero(ZOTERO_USER_ID, 'user', ZOTERO_API_KEY)
+            samling_nokkel = finn_eller_opprett_samling(zot, MAPPE_NAVN)
+
             item = zot.item_template('newspaperArticle')
-            
             item['title'] = metadata.get('title', 'Uten tittel')
             item['publicationTitle'] = metadata.get('publicationTitle', '')
             item['place'] = metadata.get('place', '')
@@ -122,11 +141,11 @@ if opplastede_filer:
             item['pages'] = metadata.get('pages', '')
             item['language'] = metadata.get('language', 'Norsk')
             item['abstractNote'] = metadata.get('abstractNote', '')
+            item['collections'] = [samling_nokkel]
             
             if nb_url.strip():
                 item['url'] = nb_url.strip()
 
-            # Legg til forfattere
             creators = []
             for author in metadata.get('authors', []):
                 creators.append({
@@ -137,7 +156,6 @@ if opplastede_filer:
             if creators:
                 item['creators'] = creators
 
-            # Legg til emneord (tags)
             if metadata.get('tags'):
                 item['tags'] = [{'tag': str(t).strip()} for t in metadata['tags']]
 
@@ -152,7 +170,7 @@ if opplastede_filer:
                 os.remove(temp_pdf_sti)
 
             progress.progress(100, text="Ferdig!")
-            st.success(f"✅ Lagret i Zotero: **{metadata.get('title')}** ({metadata.get('pages')})")
+            st.success(f"✅ Lagret i Zotero under **{MAPPE_NAVN}**: **{metadata.get('title')}** ({metadata.get('date')}, s. {metadata.get('pages')})")
             
             with st.expander("Se registrerte metadata og emneord"):
                 st.json(metadata)
