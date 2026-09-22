@@ -3,17 +3,17 @@ import img2pdf
 import json
 import os
 import re
-from google import genai
-from google.genai import types
+import base64
+import requests
 from pyzotero import zotero
 
 st.set_page_config(page_title="Avis til Zotero", page_icon="📰", layout="centered")
 st.title("📰 Avisutklipp til Zotero")
 
 # Hent konfigurasjon fra Streamlit Secrets
-ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"])
-ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"])
-GEMINI_API_KEY = str(st.secrets["GEMINI_API_KEY"])
+ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip()
+ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip()
+GEMINI_API_KEY = str(st.secrets["GEMINI_API_KEY"]).strip()
 
 opplastede_filer = st.file_uploader(
     "Dra inn utklippene av oppslaget (første bilde må inneholde tittel/byline)",
@@ -22,7 +22,6 @@ opplastede_filer = st.file_uploader(
 )
 
 if opplastede_filer:
-    # Sorter filene alfabetisk på navn (sak_1, sak_2 etc.)
     opplastede_filer.sort(key=lambda x: x.name)
     st.caption(f"Filer i rekkefølge: {', '.join([f.name for f in opplastede_filer])}")
 
@@ -30,9 +29,9 @@ if opplastede_filer:
         progress = st.progress(0, text="Analyserer oppslaget med Gemini...")
         
         try:
-            # 1. Hent metadata fra bilde 1 med Gemini Flash
+            # 1. Hent metadata fra bilde 1 via direkte REST-kall
             forste_bilde_bytes = opplastede_filer[0].getvalue()
-            client = genai.Client(api_key=GEMINI_API_KEY)
+            b64_image = base64.b64encode(forste_bilde_bytes).decode("utf-8")
             
             prompt = """
             Analyser denne avissiden og trekk ut bibliografisk metadata for hovedartikkelen.
@@ -48,16 +47,31 @@ if opplastede_filer:
             Dersom forfatter/byline mangler, la authors være tom liste.
             """
 
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[
-                    types.Part.from_bytes(data=forste_bilde_bytes, mime_type='image/png'),
-                    prompt
-                ]
-            )
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": opplastede_filer[0].type or "image/png",
+                                "data": b64_image
+                            }
+                        },
+                        {"text": prompt}
+                    ]
+                }]
+            }
 
-            # Rens svartekst for eventuelle kodeblokker
-            renset_json = re.sub(r"^```json\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE)
+            resp = requests.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                raise Exception(f"Gemini API feil ({resp.status_code}): {resp.text}")
+
+            result_json = resp.json()
+            raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
+            
+            # Rens eventuelle kodeblokker rundt JSON
+            renset_json = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
             metadata = json.loads(renset_json)
 
             progress.progress(40, text=f"Fant: «{metadata.get('title')}». Pakker PDF...")
