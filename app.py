@@ -27,13 +27,12 @@ opplastede_filer = st.file_uploader(
 )
 
 def finn_eller_opprett_samling(zot, samlingsnavn):
-    """Finner Zotero-nøkkelen til en samling/mappe, eller oppretter den på rotnivå."""
+    """Finner Zotero-nøkkelen til en samling/mappe, uansett hvor i mappetreet den ligger."""
     alle_samlinger = zot.collections()
     for col in alle_samlinger:
         if col.get("data", {}).get("name") == samlingsnavn:
             return col["key"]
     
-    # Tving mappen til rotnivå (parentCollection: False)
     ny_samling = zot.create_collections([{"name": samlingsnavn, "parentCollection": False}])
     return ny_samling["successful"]["0"]["key"]
 
@@ -45,7 +44,7 @@ if opplastede_filer:
         progress = st.progress(0, text="Analyserer oppslaget med Gemini...")
         
         try:
-            # 1. Klargjør bilder for metadata (første og siste side)
+            # 1. Klargjør bilder for metadata (første og siste side for intervall)
             deler_til_gemini = []
             
             b64_forste = base64.b64encode(opplastede_filer[0].getvalue()).decode("utf-8")
@@ -66,29 +65,26 @@ if opplastede_filer:
                 })
 
             prompt = """
-            Analyser disse avissidene (første og siste side av en avisartikkel) og trekk ut bibliografisk metadata.
+            Analyser disse avissidene (første og siste side av en artikkel) og trekk ut bibliografisk metadata.
             
-            VIKTIG OM DATO OG ÅRSTALL:
-            - Se nøye på datostripen/kolofonen øverst eller nederst på siden (f.eks. 'Lørdag 19. september 2026').
-            - Les av det FAKTISKE året som står trykket (f.eks. 2026). Ikke gjett eller endre årstallet til eldre årstall. Formatet skal være YYYY-MM-DD.
+            VIKTIG:
+            - Les av det FAKTISKE året og datoen trykket i avishodet (f.eks. '2026-09-19'). Format: YYYY-MM-DD.
+            - Les sidetallene fra første og siste side (f.eks. '16-21').
+            - Ikke bruk doble anførselstegn inni tittel eller abstract (bruk enkle ' eller utelat).
             
-            VIKTIG OM SIDETALL:
-            - Se på sidetallene trykket i hjørnene på første og siste side, og oppgi hele spennet (f.eks. 16-21).
-
-            Svar KUN med et gyldig JSON-objekt:
+            Returner et JSON-objekt med nøyaktig disse feltene:
             {
-              "title": "Hovedoverskriften på artikkelen",
+              "title": "Hovedoverskrift på artikkelen",
               "authors": [{"firstName": "Fornavn", "lastName": "Etternavn"}],
-              "publicationTitle": "Navn på avisen (f.eks. Fædrelandsvennen)",
-              "place": "By/sted avisen utgis i (f.eks. Kristiansand)",
-              "section": "Seksjon/del (f.eks. Helg, Magasin, Nyheter)",
+              "publicationTitle": "Navn på avisen",
+              "place": "By/sted",
+              "section": "Seksjon (f.eks. Helg, Nyheter)",
               "date": "YYYY-MM-DD",
-              "pages": "Komplett sideintervall (f.eks. 16-21)",
+              "pages": "Sidetall/sideintervall",
               "language": "Norsk",
-              "tags": ["3-5", "relevante", "emneord", "om", "saken"],
-              "abstractNote": "Kort og konsist sammendrag av ingressen/saken på 1-2 setninger"
+              "tags": ["3-5", "emneord"],
+              "abstractNote": "Kort sammendrag av ingressen på 1-2 setninger"
             }
-            Dersom forfatter/byline mangler, la authors være tom liste.
             """
             deler_til_gemini.append({"text": prompt})
 
@@ -97,7 +93,14 @@ if opplastede_filer:
                 "Content-Type": "application/json",
                 "x-goog-api-key": GEMINI_API_KEY
             }
-            payload = {"contents": [{"parts": deler_til_gemini}]}
+            
+            # response_mime_type tvinger Gemini til å validere JSON-strukturen før sending
+            payload = {
+                "contents": [{"parts": deler_til_gemini}],
+                "generationConfig": {
+                    "response_mime_type": "application/json"
+                }
+            }
 
             resp = None
             for forsok in range(3):
@@ -111,9 +114,7 @@ if opplastede_filer:
 
             result_json = resp.json()
             raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
-            
-            renset_json = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
-            metadata = json.loads(renset_json)
+            metadata = json.loads(raw_text.strip())
 
             progress.progress(40, text=f"Fant: «{metadata.get('title')}» ({metadata.get('date')}, s. {metadata.get('pages')}). Pakker PDF...")
 
@@ -159,11 +160,10 @@ if opplastede_filer:
             if metadata.get('tags'):
                 item['tags'] = [{'tag': str(t).strip()} for t in metadata['tags']]
 
-            # Opprett referansen i Zotero
             res = zot.create_items([item])
             item_key = res['successful']['0']['key']
 
-            # Fest PDF-en som vedlegg under referansen
+            # Fest PDF-en under referansen
             zot.attachment_simple([temp_pdf_sti], item_key)
 
             if os.path.exists(temp_pdf_sti):
