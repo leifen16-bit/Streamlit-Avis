@@ -2,3 +2,4 @@ streamlit
 img2pdf
 pyzotero
 requests
+Pillow
