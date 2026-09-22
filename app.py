@@ -10,10 +10,10 @@ from pyzotero import zotero
 st.set_page_config(page_title="Avis til Zotero", page_icon="📰", layout="centered")
 st.title("📰 Avisutklipp til Zotero")
 
-# Hent konfigurasjon fra Streamlit Secrets
-ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip()
-ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip()
-GEMINI_API_KEY = str(st.secrets["GEMINI_API_KEY"]).strip()
+# Hent konfigurasjon fra Streamlit Secrets og rens bort eventuelle anførselstegn/mellomrom
+ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip().strip('"').strip("'")
+ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip().strip('"').strip("'")
+GEMINI_API_KEY = str(st.secrets["GEMINI_API_KEY"]).strip().strip('"').strip("'")
 
 opplastede_filer = st.file_uploader(
     "Dra inn utklippene av oppslaget (første bilde må inneholde tittel/byline)",
@@ -47,8 +47,15 @@ if opplastede_filer:
             Dersom forfatter/byline mangler, la authors være tom liste.
             """
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-            headers = {"Content-Type": "application/json"}
+            # URL UTEN nøkkel i adresselinjen
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            
+            # Nøkkelen sendes via x-goog-api-key i headeren (påkrevd for nye AQ-nøkler)
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": GEMINI_API_KEY
+            }
+            
             payload = {
                 "contents": [{
                     "parts": [
