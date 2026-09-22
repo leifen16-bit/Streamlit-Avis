@@ -11,9 +11,9 @@ st.set_page_config(page_title="Avis til Zotero", page_icon="📰", layout="cente
 st.title("📰 Avisutklipp til Zotero")
 
 # Hent konfigurasjon fra Streamlit Secrets
-ZOTERO_USER_ID = str(st.secrets["5646960"])
-ZOTERO_API_KEY = str(st.secrets["OVBzguFpLhZstCm95xpyo9Qw "])
-GEMINI_API_KEY = str(st.secrets["AQ.Ab8RN6JV_Dd4hJGam5PLodyMGP-Khxv5KWvBjKnXvKkxEEQ9nQ"])
+ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"])
+ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"])
+GEMINI_API_KEY = str(st.secrets["GEMINI_API_KEY"])
 
 opplastede_filer = st.file_uploader(
     "Dra inn utklippene av oppslaget (første bilde må inneholde tittel/byline)",
