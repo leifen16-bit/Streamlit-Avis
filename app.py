@@ -48,7 +48,7 @@ if opplastede_filer:
             """
 
             # URL UTEN nøkkel i adresselinjen
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
             
             # Nøkkelen sendes via x-goog-api-key i headeren (påkrevd for nye AQ-nøkler)
             headers = {
