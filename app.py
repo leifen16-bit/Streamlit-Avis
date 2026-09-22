@@ -27,7 +27,7 @@ opplastede_filer = st.file_uploader(
 )
 
 def finn_eller_opprett_samling(zot, samlingsnavn):
-    """Finner Zotero-nøkkelen til en samling/mappe, uansett hvor i mappetreet den ligger."""
+    """Finner Zotero-nøkkelen til en samling/mappe uansett hvor den ligger i biblioteket."""
     alle_samlinger = zot.collections()
     for col in alle_samlinger:
         if col.get("data", {}).get("name") == samlingsnavn:
@@ -41,49 +41,45 @@ if opplastede_filer:
     st.caption(f"Filer i rekkefølge: {', '.join([f.name for f in opplastede_filer])}")
 
     if st.button("🚀 Behandle og send til Zotero", type="primary"):
-        progress = st.progress(0, text="Analyserer oppslaget med Gemini...")
+        progress = st.progress(0, text=f"Sender alle {len(opplastede_filer)} sider til full analyse...")
         
         try:
-            # 1. Klargjør bilder for metadata (første og siste side for intervall)
+            # 1. Klargjør samtlige sider for Gemini
             deler_til_gemini = []
-            
-            b64_forste = base64.b64encode(opplastede_filer[0].getvalue()).decode("utf-8")
-            deler_til_gemini.append({
-                "inline_data": {
-                    "mime_type": opplastede_filer[0].type or "image/png",
-                    "data": b64_forste
-                }
-            })
-            
-            if len(opplastede_filer) > 1:
-                b64_siste = base64.b64encode(opplastede_filer[-1].getvalue()).decode("utf-8")
+            for fil in opplastede_filer:
+                b64_bilde = base64.b64encode(fil.getvalue()).decode("utf-8")
                 deler_til_gemini.append({
                     "inline_data": {
-                        "mime_type": opplastede_filer[-1].type or "image/png",
-                        "data": b64_siste
+                        "mime_type": fil.type or "image/png",
+                        "data": b64_bilde
                     }
                 })
 
             prompt = """
-            Analyser disse avissidene (første og siste side av en artikkel) og trekk ut bibliografisk metadata.
+            Analyser disse avissidene (alle sidene i en komplett avisartikkel) og trekk ut bibliografisk metadata.
             
-            VIKTIG:
+            VIKTIG OM METADATA:
             - Les av det FAKTISKE året og datoen trykket i avishodet (f.eks. '2026-09-19'). Format: YYYY-MM-DD.
-            - Les sidetallene fra første og siste side (f.eks. '16-21').
-            - Ikke bruk doble anførselstegn inni tittel eller abstract (bruk enkle ' eller utelat).
+            - Les hele sidetallsintervallet for artikkelen (f.eks. '16-21').
+            - Ikke bruk doble anførselstegn inni tittel eller sammendrag (bruk enkle sitattegn ' eller utelat).
             
+            VIKTIG OM SAMMENDRAGET (abstractNote):
+            - Skriv et substansielt, presist og faglig velskrevet sammendrag på 4-6 setninger på norsk.
+            - Baser deg på HELE artikkelen (ikke bare en kopi av ingressen).
+            - Gjør rede for sakens kjerne, sentrale personer og sitater, vesentlige faglige eller prinsipielle argumenter, eventuelle motstemmer/kritikk i artikkelen, samt konklusjon eller nåværende status.
+
             Returner et JSON-objekt med nøyaktig disse feltene:
             {
               "title": "Hovedoverskrift på artikkelen",
               "authors": [{"firstName": "Fornavn", "lastName": "Etternavn"}],
               "publicationTitle": "Navn på avisen",
               "place": "By/sted",
-              "section": "Seksjon (f.eks. Helg, Nyheter)",
+              "section": "Seksjon (f.eks. Helg, Magasin, Nyheter)",
               "date": "YYYY-MM-DD",
-              "pages": "Sidetall/sideintervall",
+              "pages": "Sidetall/sideintervall (f.eks. 16-21)",
               "language": "Norsk",
-              "tags": ["3-5", "emneord"],
-              "abstractNote": "Kort sammendrag av ingressen på 1-2 setninger"
+              "tags": ["3-6", "relevante", "emneord"],
+              "abstractNote": "Substansielt sammendrag på 4-6 setninger som dekker hele saken"
             }
             """
             deler_til_gemini.append({"text": prompt})
@@ -93,8 +89,6 @@ if opplastede_filer:
                 "Content-Type": "application/json",
                 "x-goog-api-key": GEMINI_API_KEY
             }
-            
-            # response_mime_type tvinger Gemini til å validere JSON-strukturen før sending
             payload = {
                 "contents": [{"parts": deler_til_gemini}],
                 "generationConfig": {
@@ -116,7 +110,11 @@ if opplastede_filer:
             raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
             metadata = json.loads(raw_text.strip())
 
-            progress.progress(40, text=f"Fant: «{metadata.get('title')}» ({metadata.get('date')}, s. {metadata.get('pages')}). Pakker PDF...")
+            # Token-statistikk
+            usage = result_json.get("usageMetadata", {})
+            totalt_tokens = usage.get("totalTokenCount", 0)
+
+            progress.progress(45, text=f"Leste {len(opplastede_filer)} sider! Pakker tapsfri PDF...")
 
             # 2. Pakk alle bildene til én tapsfri PDF
             alle_bytes = [f.getvalue() for f in opplastede_filer]
@@ -127,7 +125,7 @@ if opplastede_filer:
             with open(temp_pdf_sti, "wb") as f:
                 f.write(pdf_bytes)
 
-            progress.progress(70, text=f"Lagrer i mappen «{MAPPE_NAVN}» i Zotero...")
+            progress.progress(75, text=f"Sender til mappen «{MAPPE_NAVN}» i Zotero...")
 
             # 3. Zotero-opprettelse
             zot = zotero.Zotero(ZOTERO_USER_ID, 'user', ZOTERO_API_KEY)
@@ -170,9 +168,12 @@ if opplastede_filer:
                 os.remove(temp_pdf_sti)
 
             progress.progress(100, text="Ferdig!")
-            st.success(f"✅ Lagret i Zotero under **{MAPPE_NAVN}**: **{metadata.get('title')}** ({metadata.get('date')}, s. {metadata.get('pages')})")
+            st.success(f"✅ Lagret i Zotero under **{MAPPE_NAVN}**: **{metadata.get('title')}** ({metadata.get('pages')})")
             
-            with st.expander("Se registrerte metadata og emneord"):
+            if totalt_tokens:
+                st.caption(f"⚡ Fullført analyse av {len(opplastede_filer)} sider på {totalt_tokens} tokens.")
+
+            with st.expander("Se registrerte metadata, sammendrag og emneord"):
                 st.json(metadata)
 
         except Exception as e:
