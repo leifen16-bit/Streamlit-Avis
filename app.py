@@ -65,8 +65,12 @@ if opplastede_filer:
             
             VIKTIG OM SAMMENDRAGET (abstractNote):
             - Skriv et substansielt, presist og faglig velskrevet sammendrag på 4-6 setninger på norsk.
-            - Baser deg på HELE artikkelen (ikke bare en kopi av ingressen).
+            - Baser deg på HELE artikkelen (ikke bare ingressen).
             - Gjør rede for sakens kjerne, sentrale personer og sitater, vesentlige faglige eller prinsipielle argumenter, eventuelle motstemmer/kritikk i artikkelen, samt konklusjon eller nåværende status.
+
+            VIKTIG OM EMNEORD (tags):
+            - Generer 3-6 relevante tematiske emneord om sakens innhold.
+            - EGET PERSONSØK: Undersøk nøye om navnet 'Leif Egil', 'Reve', eller 'Leif Egil Rønaasen Reve' er nevnt noe sted på sidene (i brødtekst, sitater, byline eller bildetekster). Dersom dette navnet forekommer, SKAL taggen 'Leif Egil Reve' ALLTID legges til i 'tags'-listen i tillegg til de andre emneordene.
 
             Returner et JSON-objekt med nøyaktig disse feltene:
             {
@@ -78,7 +82,7 @@ if opplastede_filer:
               "date": "YYYY-MM-DD",
               "pages": "Sidetall/sideintervall (f.eks. 16-21)",
               "language": "Norsk",
-              "tags": ["3-6", "relevante", "emneord"],
+              "tags": ["3-6 emneord", "pluss ev. 'Leif Egil Reve'"],
               "abstractNote": "Substansielt sammendrag på 4-6 setninger som dekker hele saken"
             }
             """
@@ -155,8 +159,15 @@ if opplastede_filer:
             if creators:
                 item['creators'] = creators
 
-            if metadata.get('tags'):
-                item['tags'] = [{'tag': str(t).strip()} for t in metadata['tags']]
+            # Unike emneord inkl. ev. persontagg
+            tags_unike = []
+            for t in metadata.get('tags', []):
+                t_str = str(t).strip()
+                if t_str and t_str not in tags_unike:
+                    tags_unike.append(t_str)
+
+            if tags_unike:
+                item['tags'] = [{'tag': t} for t in tags_unike]
 
             res = zot.create_items([item])
             item_key = res['successful']['0']['key']
