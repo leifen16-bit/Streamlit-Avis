@@ -6,6 +6,7 @@ import re
 import base64
 import time
 import requests
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from pyzotero import zotero
 
 st.set_page_config(page_title="Avis til Zotero", page_icon="📰", layout="centered")
@@ -18,13 +19,37 @@ ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip().strip('"').strip("'")
 ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip().strip('"').strip("'")
 GEMINI_API_KEY = str(st.secrets["GEMINI_API_KEY"]).strip().strip('"').strip("'")
 
-nb_url = st.text_input("🔗 Valgfri URL til Nasjonalbiblioteket / kilde (kan stå tom):")
+nb_url_input = st.text_input("🔗 Valgfri URL til Nasjonalbiblioteket / kilde (kan stå tom):")
 
 opplastede_filer = st.file_uploader(
     "Dra inn utklippene av oppslaget (første bilde må inneholde tittel/byline)",
     type=["png", "jpg", "jpeg", "webp"],
     accept_multiple_files=True
 )
+
+def rens_nb_url(url_tekst):
+    """Renser Nasjonalbiblioteket-lenker for søkeord og støy, men beholder sidetall."""
+    if not url_tekst or not url_tekst.strip():
+        return ""
+    url_tekst = url_tekst.strip()
+    parsed = urlparse(url_tekst)
+    
+    # Hvis lenken er fra nb.no, behold kun ID og ?page=X
+    if "nb.no" in parsed.netloc:
+        query_params = parse_qs(parsed.query)
+        ny_query = {}
+        if "page" in query_params:
+            ny_query["page"] = query_params["page"][0]
+        
+        return urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            "",
+            urlencode(ny_query) if ny_query else "",
+            ""
+        ))
+    return url_tekst
 
 def finn_eller_opprett_samling(zot, samlingsnavn):
     """Finner Zotero-nøkkelen til en samling/mappe uansett hvor den ligger i biblioteket."""
@@ -114,7 +139,6 @@ if opplastede_filer:
             raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
             metadata = json.loads(raw_text.strip())
 
-            # Token-statistikk
             usage = result_json.get("usageMetadata", {})
             totalt_tokens = usage.get("totalTokenCount", 0)
 
@@ -146,8 +170,10 @@ if opplastede_filer:
             item['abstractNote'] = metadata.get('abstractNote', '')
             item['collections'] = [samling_nokkel]
             
-            if nb_url.strip():
-                item['url'] = nb_url.strip()
+            # Rens URL før lagring i Zotero
+            renset_lenke = rens_nb_url(nb_url_input)
+            if renset_lenke:
+                item['url'] = renset_lenke
 
             creators = []
             for author in metadata.get('authors', []):
@@ -181,6 +207,8 @@ if opplastede_filer:
             progress.progress(100, text="Ferdig!")
             st.success(f"✅ Lagret i Zotero under **{MAPPE_NAVN}**: **{metadata.get('title')}** ({metadata.get('pages')})")
             
+            if renset_lenke:
+                st.caption(f"🔗 Lagret kildelenke: `{renset_lenke}`")
             if totalt_tokens:
                 st.caption(f"⚡ Fullført analyse av {len(opplastede_filer)} sider på {totalt_tokens} tokens.")
 
