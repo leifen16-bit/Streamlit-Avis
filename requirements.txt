@@ -1,4 +1,4 @@
 streamlit
 img2pdf
-google-genai
 pyzotero
+requests
