@@ -10,7 +10,22 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from pyzotero import zotero
 
 st.set_page_config(page_title="Avis til Zotero", page_icon="📰", layout="centered")
-st.title("📰 Avisutklipp til Zotero")
+
+# Håndter nullstilling av inputfeltene via en teller i session_state
+if "opplastings_id" not in st.session_state:
+    st.session_state.opplastings_id = 0
+
+def neste_artikkel():
+    st.session_state.opplastings_id += 1
+    st.rerun()
+
+col_tittel, col_nullstill = st.columns([4, 1])
+with col_tittel:
+    st.title("📰 Avisutklipp til Zotero")
+with col_nullstill:
+    st.write("")
+    if st.button("🔄 Tøm felt", help="Nullstill URL og opplastede filer"):
+        neste_artikkel()
 
 MAPPE_NAVN = "Avisartikler via Streamlit"
 
@@ -19,12 +34,17 @@ ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip().strip('"').strip("'")
 ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip().strip('"').strip("'")
 GEMINI_API_KEY = str(st.secrets["GEMINI_API_KEY"]).strip().strip('"').strip("'")
 
-nb_url_input = st.text_input("🔗 Valgfri URL til Nasjonalbiblioteket / kilde (kan stå tom):")
+# Feltene er bundet til opplastings_id, slik at de tømmes helt ved nullstilling
+nb_url_input = st.text_input(
+    "🔗 Valgfri URL til Nasjonalbiblioteket / kilde (kan stå tom):",
+    key=f"nb_url_{st.session_state.opplastings_id}"
+)
 
 opplastede_filer = st.file_uploader(
     "Dra inn utklippene av oppslaget (første bilde må inneholde tittel/byline)",
     type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True
+    accept_multiple_files=True,
+    key=f"uploader_{st.session_state.opplastings_id}"
 )
 
 def rens_nb_url(url_tekst):
@@ -34,7 +54,6 @@ def rens_nb_url(url_tekst):
     url_tekst = url_tekst.strip()
     parsed = urlparse(url_tekst)
     
-    # Hvis lenken er fra nb.no, behold kun ID og ?page=X
     if "nb.no" in parsed.netloc:
         query_params = parse_qs(parsed.query)
         ny_query = {}
@@ -170,7 +189,6 @@ if opplastede_filer:
             item['abstractNote'] = metadata.get('abstractNote', '')
             item['collections'] = [samling_nokkel]
             
-            # Rens URL før lagring i Zotero
             renset_lenke = rens_nb_url(nb_url_input)
             if renset_lenke:
                 item['url'] = renset_lenke
@@ -185,7 +203,6 @@ if opplastede_filer:
             if creators:
                 item['creators'] = creators
 
-            # Unike emneord inkl. ev. persontagg
             tags_unike = []
             for t in metadata.get('tags', []):
                 t_str = str(t).strip()
@@ -208,12 +225,16 @@ if opplastede_filer:
             st.success(f"✅ Lagret i Zotero under **{MAPPE_NAVN}**: **{metadata.get('title')}** ({metadata.get('pages')})")
             
             if renset_lenke:
-                st.caption(f"🔗 Lagret kildelenke: `{renset_lenke}`")
+                st.caption(f"🔗 Kildelenke: `{renset_lenke}`")
             if totalt_tokens:
-                st.caption(f"⚡ Fullført analyse av {len(opplastede_filer)} sider på {totalt_tokens} tokens.")
+                st.caption(f"⚡ Fullført analyse på {totalt_tokens} tokens.")
 
             with st.expander("Se registrerte metadata, sammendrag og emneord"):
                 st.json(metadata)
+
+            st.divider()
+            # Stor knapp for å rydde og gå rett videre til neste oppslag
+            st.button("✨ Klargjør for neste artikkel", on_click=neste_artikkel, type="primary")
 
         except Exception as e:
             st.error(f"Det oppstod en feil: {e}")
