@@ -73,7 +73,7 @@ if opplastede_filer:
             """
             deler_til_gemini.append({"text": prompt})
 
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
             headers = {
                 "Content-Type": "application/json",
                 "x-goog-api-key": GEMINI_API_KEY
