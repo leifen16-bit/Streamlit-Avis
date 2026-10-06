@@ -284,4 +284,63 @@ if opplastede_filer:
 
             # 5. Lagre i Zotero
             zot = zotero.Zotero(ZOTERO_USER_ID, 'user', ZOTERO_API_KEY)
-            samling_nokkel = finn_eller_opprett_samling(zot, MAPPE
+            samling_nokkel = finn_eller_opprett_samling(zot, MAPPE_NAVN)
+
+            item = zot.item_template('newspaperArticle')
+            item['title'] = metadata.get('title', 'Uten tittel')
+            item['publicationTitle'] = metadata.get('publicationTitle', '')
+            item['place'] = metadata.get('place', '')
+            item['section'] = metadata.get('section', '')
+            item['date'] = metadata.get('date', '')
+            item['pages'] = metadata.get('pages', '')
+            item['language'] = metadata.get('language', 'Norsk')
+            item['abstractNote'] = metadata.get('abstractNote', '')
+            item['collections'] = [samling_nokkel]
+            
+            renset_lenke = rens_nb_url(nb_url_input)
+            if renset_lenke:
+                item['url'] = renset_lenke
+
+            creators = []
+            for author in metadata.get('authors', []):
+                creators.append({
+                    'creatorType': 'author',
+                    'firstName': author.get('firstName', ''),
+                    'lastName': author.get('lastName', '')
+                })
+            if creators:
+                item['creators'] = creators
+
+            tags_unike = []
+            for t in metadata.get('tags', []):
+                t_str = str(t).strip()
+                if t_str and t_str not in tags_unike:
+                    tags_unike.append(t_str)
+
+            if tags_unike:
+                item['tags'] = [{'tag': t} for t in tags_unike]
+
+            res = zot.create_items([item])
+            item_key = res['successful']['0']['key']
+
+            zot.attachment_simple([temp_pdf_sti], item_key)
+
+            if os.path.exists(temp_pdf_sti):
+                os.remove(temp_pdf_sti)
+
+            progress.progress(100, text="Ferdig!")
+            st.success(f"✅ Lagret i Zotero under **{MAPPE_NAVN}**: **{metadata.get('title')}** (s. {metadata.get('pages')})")
+            
+            if renset_lenke:
+                st.caption(f"🔗 Kildelenke: `{renset_lenke}`")
+            if totalt_tokens:
+                st.caption(f"⚡ Fullført analyse via Vertex AI på {totalt_tokens} tokens.")
+
+            with st.expander("Se registrerte metadata, sammendrag og emneord"):
+                st.json(metadata)
+
+            st.divider()
+            st.button("✨ Klargjør for neste artikkel", on_click=neste_artikkel, type="primary")
+
+        except Exception as e:
+            st.error(f"Det oppstod en feil: {e}")
