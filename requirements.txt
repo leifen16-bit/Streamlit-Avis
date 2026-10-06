@@ -3,3 +3,5 @@ img2pdf
 pyzotero
 requests
 Pillow
+google-genai
+google-auth
