@@ -15,7 +15,7 @@ from google.oauth2 import service_account
 
 st.set_page_config(page_title="Avis til Zotero", page_icon="📰", layout="centered")
 
-# Standardregler for systematiske emneord (kan redigeres direkte i appen)
+# Standardregler for systematiske emneord (kan tilpasses i grensesnittet)
 STANDARD_TAGG_REGLER = """Leif Egil Reve: Nevner 'Leif Egil', 'Reve' eller 'Leif Egil Rønaasen Reve' i brødtekst, byline eller bildetekster
 Kommunikasjon og livssyn: Nevner 'Kommunikasjon og livssyn', forkortelsen 'KL' i studiesammenheng, eller fagfeltet
 Artikkel-KL: Nevner 'Kommunikasjon og livssyn' eller 'KL'"""
@@ -38,22 +38,18 @@ with col_nullstill:
 
 MAPPE_NAVN = "Avisartikler via Streamlit"
 
-# Autentisering og oppsett mot Vertex AI
+# Autentisering mot Vertex AI med automatisk reparasjon av private_key
 @st.cache_resource
 def get_vertex_client():
     gcp_info = dict(st.secrets["gcp_service_account"])
     project_id = gcp_info.get("project_id", "project-5aad088e-3f07-49db-be9")
     
-    # Automatisk rens og formatering av PEM-nøkkel
     if "private_key" in gcp_info:
         pk = str(gcp_info["private_key"]).replace("\\n", "\n").strip()
-        
-        # Hvis header eller footer mangler, legg dem til automatisk
         if not pk.startswith("-----BEGIN"):
             pk = f"-----BEGIN PRIVATE KEY-----\n{pk}"
         if not pk.endswith("-----END PRIVATE KEY-----"):
             pk = f"{pk}\n-----END PRIVATE KEY-----"
-            
         gcp_info["private_key"] = pk
 
     creds = service_account.Credentials.from_service_account_info(
@@ -67,6 +63,13 @@ def get_vertex_client():
         credentials=creds,
     )
 
+# Opprett klienten globalt
+try:
+    ai_client = get_vertex_client()
+except Exception as e:
+    st.error(f"Kunne ikke koble til Vertex AI. Sjekk [gcp_service_account] i Streamlit Secrets: {e}")
+    st.stop()
+
 # Zotero konfigurasjon
 ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip().strip('"').strip("'")
 ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip().strip('"').strip("'")
@@ -74,7 +77,7 @@ ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip().strip('"').strip("'")
 # Sidebar: Modellvalg
 valgt_modell = st.sidebar.selectbox(
     "🤖 Gemini-modell (Vertex AI)",
-    ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.1-pro-preview"],
+    ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.1-pro-preview"],
     index=0
 )
 
@@ -84,7 +87,6 @@ nb_url_input = st.text_input(
     key=f"nb_url_{st.session_state.opplastings_id}"
 )
 
-# Egendefinerte tagg-regler som kan tilpasses direkte i UI
 with st.expander("🏷️ Faste sporings- og taggregler (klikk for å tilpasse)", expanded=False):
     st.caption("Skriv én regel per linje: `Taggnavn: Søkeord eller kriterier`. Gemini sjekker teksten for disse i tillegg til dynamiske emneord.")
     aktive_tagg_regler = st.text_area(
@@ -240,7 +242,7 @@ if opplastede_filer:
             """
             innhold_til_gemini.append(prompt)
 
-            # 3. Kjør Vertex AI-kall med automatisk retry ved nettverksavbrudd
+            # 3. Utfør API-kall mot Vertex AI
             config = types.GenerateContentConfig(
                 response_mime_type="application/json"
             )
@@ -264,14 +266,13 @@ if opplastede_filer:
             renset_json = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
             metadata = json.loads(renset_json)
 
-            # Tokenstatistikk fra Vertex AI
             totalt_tokens = 0
             if hasattr(response, "usage_metadata") and response.usage_metadata:
                 totalt_tokens = getattr(response.usage_metadata, "total_token_count", 0)
 
             progress.progress(60, text=f"Fant: «{metadata.get('title')}» ({metadata.get('pages')}). Pakker PDF...")
 
-            # 4. Pakk de enkelte sidene til en stående, tapsfri PDF
+            # 4. Pakk enkeltsidene til stående PDF
             pdf_bytes = img2pdf.convert(enkeltsider_bytes)
 
             filnavn_tittel = re.sub(r'[^a-zA-Z0-9æøåÆØÅ_ -]', '', metadata.get('title', 'Avisartikkel'))[:40].strip()
@@ -281,67 +282,6 @@ if opplastede_filer:
 
             progress.progress(80, text=f"Sender til mappen «{MAPPE_NAVN}» i Zotero...")
 
-            # 5. Zotero-opprettelse
+            # 5. Lagre i Zotero
             zot = zotero.Zotero(ZOTERO_USER_ID, 'user', ZOTERO_API_KEY)
-            samling_nokkel = finn_eller_opprett_samling(zot, MAPPE_NAVN)
-
-            item = zot.item_template('newspaperArticle')
-            item['title'] = metadata.get('title', 'Uten tittel')
-            item['publicationTitle'] = metadata.get('publicationTitle', '')
-            item['place'] = metadata.get('place', '')
-            item['section'] = metadata.get('section', '')
-            item['date'] = metadata.get('date', '')
-            item['pages'] = metadata.get('pages', '')
-            item['language'] = metadata.get('language', 'Norsk')
-            item['abstractNote'] = metadata.get('abstractNote', '')
-            item['collections'] = [samling_nokkel]
-            
-            renset_lenke = rens_nb_url(nb_url_input)
-            if renset_lenke:
-                item['url'] = renset_lenke
-
-            creators = []
-            for author in metadata.get('authors', []):
-                creators.append({
-                    'creatorType': 'author',
-                    'firstName': author.get('firstName', ''),
-                    'lastName': author.get('lastName', '')
-                })
-            if creators:
-                item['creators'] = creators
-
-            # Sikre unike emneord
-            tags_unike = []
-            for t in metadata.get('tags', []):
-                t_str = str(t).strip()
-                if t_str and t_str not in tags_unike:
-                    tags_unike.append(t_str)
-
-            if tags_unike:
-                item['tags'] = [{'tag': t} for t in tags_unike]
-
-            res = zot.create_items([item])
-            item_key = res['successful']['0']['key']
-
-            # Fest PDF-en under referansen
-            zot.attachment_simple([temp_pdf_sti], item_key)
-
-            if os.path.exists(temp_pdf_sti):
-                os.remove(temp_pdf_sti)
-
-            progress.progress(100, text="Ferdig!")
-            st.success(f"✅ Lagret i Zotero under **{MAPPE_NAVN}**: **{metadata.get('title')}** (s. {metadata.get('pages')})")
-            
-            if renset_lenke:
-                st.caption(f"🔗 Kildelenke: `{renset_lenke}`")
-            if totalt_tokens:
-                st.caption(f"⚡ Fullført analyse via Vertex AI på {totalt_tokens} tokens.")
-
-            with st.expander("Se registrerte metadata, sammendrag og emneord"):
-                st.json(metadata)
-
-            st.divider()
-            st.button("✨ Klargjør for neste artikkel", on_click=neste_artikkel, type="primary")
-
-        except Exception as e:
-            st.error(f"Det oppstod en feil: {e}")
+            samling_nokkel = finn_eller_opprett_samling(zot, MAPPE
