@@ -3,16 +3,24 @@ import img2pdf
 import json
 import os
 import re
-import base64
 import time
 import io
-import requests
 from PIL import Image
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from pyzotero import zotero
 
+from google import genai
+from google.genai import types
+from google.oauth2 import service_account
+
 st.set_page_config(page_title="Avis til Zotero", page_icon="📰", layout="centered")
 
+# Standardregler for systematiske emneord (kan redigeres direkte i appen)
+STANDARD_TAGG_REGLER = """Leif Egil Reve: Nevner 'Leif Egil', 'Reve' eller 'Leif Egil Rønaasen Reve' i brødtekst, byline eller bildetekster
+Kommunikasjon og livssyn: Nevner 'Kommunikasjon og livssyn', forkortelsen 'KL' i studiesammenheng, eller fagfeltet
+Artikkel-KL: Nevner 'Kommunikasjon og livssyn' eller 'KL'"""
+
+# Håndter nullstilling av opplastingsfelter
 if "opplastings_id" not in st.session_state:
     st.session_state.opplastings_id = 0
 
@@ -30,15 +38,54 @@ with col_nullstill:
 
 MAPPE_NAVN = "Avisartikler via Streamlit"
 
-# Hent konfigurasjon fra Streamlit Secrets
+# Autentisering og oppsett mot Vertex AI
+@st.cache_resource
+def get_vertex_client():
+    gcp_info = dict(st.secrets["gcp_service_account"])
+    project_id = gcp_info.get("project_id", "project-5aad088e-3f07-49db-be9")
+    creds = service_account.Credentials.from_service_account_info(
+        gcp_info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    return genai.Client(
+        vertexai=True,
+        project=project_id,
+        location="global",
+        credentials=creds,
+    )
+
+try:
+    ai_client = get_vertex_client()
+except Exception as e:
+    st.error(f"Kunne ikke koble til Vertex AI. Sjekk [gcp_service_account] i Streamlit Secrets: {e}")
+    st.stop()
+
+# Zotero konfigurasjon
 ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip().strip('"').strip("'")
 ZOTERO_API_KEY = str(st.secrets["ZOTERO_API_KEY"]).strip().strip('"').strip("'")
-GEMINI_API_KEY = str(st.secrets["GEMINI_API_KEY"]).strip().strip('"').strip("'")
 
+# Sidebar: Modellvalg
+valgt_modell = st.sidebar.selectbox(
+    "🤖 Gemini-modell (Vertex AI)",
+    ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.1-pro-preview"],
+    index=0
+)
+
+# Input-felter
 nb_url_input = st.text_input(
     "🔗 Valgfri URL til Nasjonalbiblioteket / kilde (kan stå tom):",
     key=f"nb_url_{st.session_state.opplastings_id}"
 )
+
+# Egendefinerte tagg-regler som kan tilpasses direkte i UI
+with st.expander("🏷️ Faste sporings- og taggregler (klikk for å tilpasse)", expanded=False):
+    st.caption("Skriv én regel per linje: `Taggnavn: Søkeord eller kriterier`. Gemini sjekker teksten for disse i tillegg til dynamiske emneord.")
+    aktive_tagg_regler = st.text_area(
+        "Aktive regler:",
+        value=STANDARD_TAGG_REGLER,
+        height=120,
+        key="custom_tag_rules"
+    )
 
 opplastede_filer = st.file_uploader(
     "Dra inn utklippene av oppslaget (første bilde må inneholde tittel/byline)",
@@ -47,7 +94,6 @@ opplastede_filer = st.file_uploader(
     key=f"uploader_{st.session_state.opplastings_id}"
 )
 
-# Standard aktiv: Deler automatisk dobbeltsider i to stående sider
 auto_splitt = st.checkbox("📖 Del dobbeltoppslag automatisk til stående enkeltsider (venstre/høyre)", value=True)
 
 def rens_nb_url(url_tekst):
@@ -84,13 +130,8 @@ def finn_eller_opprett_samling(zot, samlingsnavn):
     return ny_samling["successful"]["0"]["key"]
 
 def prosesser_og_splitt_sider(filer, aktiver_splitt=True):
-    """
-    Går gjennom opplastede bildefiler i rekkefølge.
-    Hvis et bilde er bredere enn det er høyt (dobbeltside), deles det automatisk
-    på midten til to separate stående sider (venstre side først, deretter høyre).
-    """
+    """Deler liggende oppslag i to stående enkeltsider."""
     ferdig_sider_bytes = []
-    
     for fil in filer:
         raw = fil.getvalue()
         if not aktiver_splitt:
@@ -101,7 +142,6 @@ def prosesser_og_splitt_sider(filer, aktiver_splitt=True):
             bilde = Image.open(io.BytesIO(raw))
             b, h = bilde.size
             
-            # Hvis bildet er liggende (dobbeltoppslag fra avisleser)
             if b > h:
                 midtpunkt = b // 2
                 venstre_halvdel = bilde.crop((0, 0, midtpunkt, h))
@@ -120,6 +160,22 @@ def prosesser_og_splitt_sider(filer, aktiver_splitt=True):
             
     return ferdig_sider_bytes
 
+def generer_regel_instruks(regler_tekst):
+    """Bygger prompt-instruksjoner basert på brukerens definerte tagg-regler."""
+    linjer = [l.strip() for l in regler_tekst.strip().split("\n") if l.strip() and not l.startswith("#")]
+    if not linjer:
+        return ""
+    
+    instruks = "\nVIKTIG OM SPESIFIKKE FASTE EMNEORD (tags):\n"
+    instruks += "I tillegg til generelle emneord, skal du kontrollere følgende faste regler mot hele teksten:\n"
+    for l in linjer:
+        if ":" in l:
+            tagg, kriterie = l.split(":", 1)
+            instruks += f"- Hvis teksten oppfyller '{kriterie.strip()}', SKAL taggen '{tagg.strip()}' inkluderes i 'tags'-listen.\n"
+        else:
+            instruks += f"- Hvis teksten nevner '{l.strip()}', SKAL taggen '{l.strip()}' inkluderes i 'tags'-listen.\n"
+    return instruks
+
 if opplastede_filer:
     opplastede_filer.sort(key=lambda x: x.name)
     st.caption(f"Filer i rekkefølge: {', '.join([f.name for f in opplastede_filer])}")
@@ -130,20 +186,21 @@ if opplastede_filer:
         try:
             # 1. Splitt oppslag til enkeltsider
             enkeltsider_bytes = prosesser_og_splitt_sider(opplastede_filer, aktiver_splitt=auto_splitt)
-            progress.progress(20, text=f"Genererte {len(enkeltsider_bytes)} stående sider. Analyserer med Gemini...")
+            progress.progress(20, text=f"Genererte {len(enkeltsider_bytes)} stående sider. Analyserer med {valgt_modell} via Vertex AI...")
 
-            # 2. Klargjør enkeltsidene for Gemini
-            deler_til_gemini = []
+            # 2. Klargjør enkeltsidene for Vertex AI GenAI SDK
+            innhold_til_gemini = []
             for side_bytes in enkeltsider_bytes:
-                b64_bilde = base64.b64encode(side_bytes).decode("utf-8")
-                deler_til_gemini.append({
-                    "inline_data": {
-                        "mime_type": "image/jpeg",
-                        "data": b64_bilde
-                    }
-                })
+                innhold_til_gemini.append(
+                    types.Part.from_bytes(
+                        data=side_bytes,
+                        mime_type="image/jpeg",
+                    )
+                )
 
-            prompt = """
+            systematiske_instrukser = generer_regel_instruks(aktive_tagg_regler)
+
+            prompt = f"""
             Analyser disse avissidene (alle sidene i en komplett avisartikkel, vist side for side) og trekk ut bibliografisk metadata.
             
             VIKTIG OM METADATA:
@@ -157,57 +214,57 @@ if opplastede_filer:
             - Gjør rede for sakens kjerne, sentrale personer og sitater, vesentlige faglige eller prinsipielle argumenter, eventuelle motstemmer/kritikk i artikkelen, samt konklusjon eller nåværende status.
 
             VIKTIG OM EMNEORD (tags):
-            - Generer 3-6 relevante tematiske emneord om sakens innhold.
-            - EGET PERSONSØK: Undersøk nøye om navnet 'Leif Egil', 'Reve', eller 'Leif Egil Rønaasen Reve' er nevnt noe sted på sidene (i brødtekst, sitater, byline eller bildetekster). Dersom dette navnet forekommer, SKAL taggen 'Leif Egil Reve' ALLTID legges til i 'tags'-listen i tillegg til de andre emneordene.
+            - Generer 3-6 relevante dynamiske emneord om sakens faglige/tematiske kjerne.
+            {systematiske_instrukser}
 
             Returner et JSON-objekt med nøyaktig disse feltene:
-            {
+            {{
               "title": "Hovedoverskrift på artikkelen",
-              "authors": [{"firstName": "Fornavn", "lastName": "Etternavn"}],
+              "authors": [{{"firstName": "Fornavn", "lastName": "Etternavn"}}],
               "publicationTitle": "Navn på avisen",
               "place": "By/sted",
               "section": "Seksjon (f.eks. Helg, Magasin, Nyheter, Hovedsaken)",
               "date": "YYYY-MM-DD",
               "pages": "Sidetall/sideintervall (f.eks. 14-20)",
               "language": "Norsk",
-              "tags": ["3-6 emneord", "pluss ev. 'Leif Egil Reve'"],
+              "tags": ["3-6 generelle emneord", "pluss eventuelle faste tagger utløst av reglene"],
               "abstractNote": "Substansielt sammendrag på 4-6 setninger som dekker hele saken"
-            }
+            }}
             """
-            deler_til_gemini.append({"text": prompt})
+            innhold_til_gemini.append(prompt)
 
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
-            headers = {
-                "Content-Type": "application/json",
-                "x-goog-api-key": GEMINI_API_KEY
-            }
-            payload = {
-                "contents": [{"parts": deler_til_gemini}],
-                "generationConfig": {
-                    "response_mime_type": "application/json"
-                }
-            }
+            # 3. Kjør Vertex AI-kall med automatisk retry ved nettverksavbrudd
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
 
-            resp = None
+            response = None
             for forsok in range(3):
-                resp = requests.post(url, headers=headers, json=payload)
-                if resp.status_code == 200:
+                try:
+                    response = ai_client.models.generate_content(
+                        model=valgt_modell,
+                        contents=innhold_til_gemini,
+                        config=config,
+                    )
                     break
-                elif resp.status_code == 503 and forsok < 2:
-                    time.sleep(2 * (forsok + 1))
-                else:
-                    raise Exception(f"Gemini API feil ({resp.status_code}): {resp.text}")
+                except Exception as e:
+                    if forsok < 2:
+                        time.sleep(2 * (forsok + 1))
+                    else:
+                        raise e
 
-            result_json = resp.json()
-            raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
-            metadata = json.loads(raw_text.strip())
+            raw_text = response.text
+            renset_json = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
+            metadata = json.loads(renset_json)
 
-            usage = result_json.get("usageMetadata", {})
-            totalt_tokens = usage.get("totalTokenCount", 0)
+            # Tokenstatistikk fra Vertex AI
+            totalt_tokens = 0
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                totalt_tokens = getattr(response.usage_metadata, "total_token_count", 0)
 
             progress.progress(60, text=f"Fant: «{metadata.get('title')}» ({metadata.get('pages')}). Pakker PDF...")
 
-            # 3. Pakk de enkelte sidene til en stående, tapsfri PDF
+            # 4. Pakk de enkelte sidene til en stående, tapsfri PDF
             pdf_bytes = img2pdf.convert(enkeltsider_bytes)
 
             filnavn_tittel = re.sub(r'[^a-zA-Z0-9æøåÆØÅ_ -]', '', metadata.get('title', 'Avisartikkel'))[:40].strip()
@@ -217,7 +274,7 @@ if opplastede_filer:
 
             progress.progress(80, text=f"Sender til mappen «{MAPPE_NAVN}» i Zotero...")
 
-            # 4. Zotero-opprettelse
+            # 5. Zotero-opprettelse
             zot = zotero.Zotero(ZOTERO_USER_ID, 'user', ZOTERO_API_KEY)
             samling_nokkel = finn_eller_opprett_samling(zot, MAPPE_NAVN)
 
@@ -246,6 +303,7 @@ if opplastede_filer:
             if creators:
                 item['creators'] = creators
 
+            # Sikre unike emneord
             tags_unike = []
             for t in metadata.get('tags', []):
                 t_str = str(t).strip()
@@ -270,7 +328,7 @@ if opplastede_filer:
             if renset_lenke:
                 st.caption(f"🔗 Kildelenke: `{renset_lenke}`")
             if totalt_tokens:
-                st.caption(f"⚡ Fullført analyse av {len(enkeltsider_bytes)} stående sider på {totalt_tokens} tokens.")
+                st.caption(f"⚡ Fullført analyse via Vertex AI på {totalt_tokens} tokens.")
 
             with st.expander("Se registrerte metadata, sammendrag og emneord"):
                 st.json(metadata)
