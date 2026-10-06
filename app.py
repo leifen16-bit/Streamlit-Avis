@@ -43,6 +43,19 @@ MAPPE_NAVN = "Avisartikler via Streamlit"
 def get_vertex_client():
     gcp_info = dict(st.secrets["gcp_service_account"])
     project_id = gcp_info.get("project_id", "project-5aad088e-3f07-49db-be9")
+    
+    # Automatisk rens og formatering av PEM-nøkkel
+    if "private_key" in gcp_info:
+        pk = str(gcp_info["private_key"]).replace("\\n", "\n").strip()
+        
+        # Hvis header eller footer mangler, legg dem til automatisk
+        if not pk.startswith("-----BEGIN"):
+            pk = f"-----BEGIN PRIVATE KEY-----\n{pk}"
+        if not pk.endswith("-----END PRIVATE KEY-----"):
+            pk = f"{pk}\n-----END PRIVATE KEY-----"
+            
+        gcp_info["private_key"] = pk
+
     creds = service_account.Credentials.from_service_account_info(
         gcp_info,
         scopes=["https://www.googleapis.com/auth/cloud-platform"],
@@ -53,12 +66,6 @@ def get_vertex_client():
         location="global",
         credentials=creds,
     )
-
-try:
-    ai_client = get_vertex_client()
-except Exception as e:
-    st.error(f"Kunne ikke koble til Vertex AI. Sjekk [gcp_service_account] i Streamlit Secrets: {e}")
-    st.stop()
 
 # Zotero konfigurasjon
 ZOTERO_USER_ID = str(st.secrets["ZOTERO_USER_ID"]).strip().strip('"').strip("'")
